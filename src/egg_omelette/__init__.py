@@ -3,6 +3,7 @@ import sys
 import shutil
 import logging
 import importlib.metadata
+from pathlib import Path
 
 from pkg_resources import get_distribution
 
@@ -22,9 +23,10 @@ islink = os.path.islink
 rmtree = shutil.rmtree
 unlink = None
 
+
 def makedirs(target, is_namespace=False):
-    """ Similar to os.makedirs, but adds __init__.py files as it goes.  Returns a boolean
-        indicating success.
+    """Similar to os.makedirs, but adds __init__.py files as it goes.  Returns a boolean
+    indicating success.
     """
     drive, path = os.path.splitdrive(target)
     parts = path.split(os.path.sep)
@@ -45,127 +47,152 @@ def makedirs(target, is_namespace=False):
                 init_file.close()
     return True
 
+
 WIN32 = False
+
+
+def find_package_location(package_name):
+    """Find the actual location of a package, handling editable installs."""
+    try:
+        # Try to import the package to get its actual location
+        module = __import__(package_name)
+        if hasattr(module, '__file__') and module.__file__:
+            # For packages, __file__ points to __init__.py
+            return os.path.dirname(module.__file__)
+        elif hasattr(module, '__path__'):
+            # For namespace packages
+            return module.__path__[0]
+    except ImportError:
+        pass
+    
+    # Fallback to pkg_resources location
+    try:
+        dist = get_distribution(package_name)
+        return os.path.join(dist.location, package_name)
+    except:
+        return None
 
 
 def main():
     """Main entry point for the egg-omelette console script."""
-    location = os.getcwd()
-    
-        for package in importlib.metadata.distributions():
-            project_name = package.name
-            namespaces = {}
-            dist = get_distribution(package.name)
-            for line in dist._get_metadata("namespace_packages.txt"):
-                ns = namespaces
-                for part in line.split("."):
-                    ns = ns.setdefault(part, {})
-            top_level = sorted(list(dist._get_metadata("top_level.txt")))
+    location = str(Path.cwd() / "omelette")
 
-            def create_namespaces(namespaces, ns_base=()):
-                for k, v in namespaces.items():
-                    ns_parts = ns_base + (k,)
-                    link_dir = os.path.join(location, *ns_parts)
-                    if not os.path.exists(link_dir):
-                        if not makedirs(link_dir, is_namespace=True):
-                            logger.warn(
-                                "Warning: (While processing egg %s) Could not create namespace directory (%s).  Skipping."
-                                % (project_name, link_dir)
-                            )
-                            continue
-                    if len(v) > 0:
-                        create_namespaces(v, ns_parts)
-                    egg_ns_dir = os.path.join(dist.location, *ns_parts)
-                    if not os.path.isdir(egg_ns_dir):
-                        logger.info(
-                            "(While processing egg %s) Package '%s' is zipped.  Skipping."
-                            % (project_name, os.path.sep.join(ns_parts))
+    for package in importlib.metadata.distributions():
+        project_name = package.name
+        namespaces = {}
+        dist = get_distribution(package.name)
+        for line in dist._get_metadata("namespace_packages.txt"):
+            ns = namespaces
+            for part in line.split("."):
+                ns = ns.setdefault(part, {})
+        top_level = sorted(list(dist._get_metadata("top_level.txt")))
+
+        def create_namespaces(namespaces, ns_base=()):
+            for k, v in namespaces.items():
+                ns_parts = ns_base + (k,)
+                link_dir = os.path.join(location, *ns_parts)
+                if not os.path.exists(link_dir):
+                    if not makedirs(link_dir, is_namespace=True):
+                        logger.warn(
+                            "Warning: (While processing egg %s) Could not create namespace directory (%s).  Skipping."
+                            % (project_name, link_dir)
                         )
                         continue
-                    dirs = os.listdir(egg_ns_dir)
-                    for name in dirs:
-                        if name.startswith("."):
-                            continue
-                        name_parts = ns_parts + (name,)
-                        src = os.path.join(dist.location, *name_parts)
-                        dst = os.path.join(location, *name_parts)
-                        if os.path.exists(dst):
-                            continue
-                        symlink(src, dst)
-            create_namespaces(namespaces)
-            for package_name in top_level:
-                if package_name in namespaces:
-                    # These are processed in create_namespaces
+                if len(v) > 0:
+                    create_namespaces(v, ns_parts)
+                egg_ns_dir = os.path.join(dist.location, *ns_parts)
+                if not os.path.isdir(egg_ns_dir):
+                    logger.info(
+                        "(While processing egg %s) Package '%s' is zipped.  Skipping."
+                        % (project_name, os.path.sep.join(ns_parts))
+                    )
                     continue
-                else:
-                    if not os.path.isdir(dist.location):
-                        logger.info(
-                            "(While processing egg %s) Package '%s' is zipped.  Skipping."
-                            % (project_name, package_name)
-                        )
+                dirs = os.listdir(egg_ns_dir)
+                for name in dirs:
+                    if name.startswith("."):
                         continue
+                    name_parts = ns_parts + (name,)
+                    src = os.path.join(dist.location, *name_parts)
+                    dst = os.path.join(location, *name_parts)
+                    if os.path.exists(dst):
+                        continue
+                    symlink(src, dst)
 
+        create_namespaces(namespaces)
+        for package_name in top_level:
+            if package_name in namespaces:
+                # These are processed in create_namespaces
+                continue
+            else:
+                if not os.path.isdir(dist.location):
+                    logger.info(
+                        "(While processing egg %s) Package '%s' is zipped.  Skipping."
+                        % (project_name, package_name)
+                    )
+                    continue
+
+                # Try to find the actual package location
+                package_location = find_package_location(package_name)
+                if not package_location or not os.path.exists(package_location):
+                    # Fallback to original logic
                     package_location = os.path.join(dist.location, package_name)
                     link_location = os.path.join(location, package_name)
                     # check for single python module
                     if not os.path.exists(package_location):
-                        package_location = os.path.join(
-                            dist.location, package_name + ".py"
-                        )
-                        link_location = os.path.join(
-                            location, package_name + ".py"
-                        )
+                        package_location = os.path.join(dist.location, package_name + ".py")
+                        link_location = os.path.join(location, package_name + ".py")
                     # check for native libs
                     # XXX - this should use native_libs from above
                     if not os.path.exists(package_location):
-                        package_location = os.path.join(
-                            dist.location, package_name + ".so"
-                        )
-                        link_location = os.path.join(
-                            location, package_name + ".so"
-                        )
+                        package_location = os.path.join(dist.location, package_name + ".so")
+                        link_location = os.path.join(location, package_name + ".so")
                     if not os.path.exists(package_location):
                         package_location = os.path.join(
                             dist.location, package_name + ".dll"
                         )
-                        link_location = os.path.join(
-                            location, package_name + ".dll"
-                        )
+                        link_location = os.path.join(location, package_name + ".dll")
                     if not os.path.exists(package_location):
                         logger.warn(
                             "Warning: (While processing egg %s) Package '%s' not found.  Skipping."
                             % (project_name, package_name)
                         )
                         continue
-                if not os.path.exists(link_location):
-                    if WIN32 and not os.path.isdir(package_location):
-                        logger.warn(
-                            "Warning: (While processing egg %s) Can't link files on Windows (%s -> %s).  Skipping."
-                            % (project_name, package_location, link_location)
-                        )
-                        continue
-                    try:
-                        symlink(package_location, link_location)
-                    except OSError as e:
-                        logger.warn(
-                            "While processing egg %s) symlink fails (%s, %s). Skipping.\nOriginal Exception:\n%s"
-                            % (
-                                project_name,
-                                package_location,
-                                link_location,
-                                str(e),
-                            )
-                        )
-                    # except:
-                    #    # TODO: clearify if recipe should fail on error or resume by skipping.
-                    #    # Possible solution, add a recipe option, stop_on_fail that will quit buildout on general exceptions
-                    #    self.logger.warn("Unexpected error :\nWhile processing egg %s) symlink fails (%s, %s). Skipping.\nOriginal Exception:\n%s" % (project_name, package_location, link_location, sys.exc_info()[0]))
                 else:
-                    logger.info(
-                        "(While processing egg %s) Link already exists (%s -> %s).  Skipping."
+                    # Use the found package location
+                    if os.path.isdir(package_location):
+                        link_location = os.path.join(location, package_name)
+                    else:
+                        # It's a single file module
+                        link_location = os.path.join(location, os.path.basename(package_location))
+            if not os.path.exists(link_location):
+                if WIN32 and not os.path.isdir(package_location):
+                    logger.warn(
+                        "Warning: (While processing egg %s) Can't link files on Windows (%s -> %s).  Skipping."
                         % (project_name, package_location, link_location)
                     )
                     continue
+                try:
+                    symlink(package_location, link_location)
+                except OSError as e:
+                    logger.warn(
+                        "While processing egg %s) symlink fails (%s, %s). Skipping.\nOriginal Exception:\n%s"
+                        % (
+                            project_name,
+                            package_location,
+                            link_location,
+                            str(e),
+                        )
+                    )
+                # except:
+                #    # TODO: clearify if recipe should fail on error or resume by skipping.
+                #    # Possible solution, add a recipe option, stop_on_fail that will quit buildout on general exceptions
+                #    self.logger.warn("Unexpected error :\nWhile processing egg %s) symlink fails (%s, %s). Skipping.\nOriginal Exception:\n%s" % (project_name, package_location, link_location, sys.exc_info()[0]))
+            else:
+                logger.info(
+                    "(While processing egg %s) Link already exists (%s -> %s).  Skipping."
+                    % (project_name, package_location, link_location)
+                )
+                continue
 
 
 if __name__ == "__main__":
